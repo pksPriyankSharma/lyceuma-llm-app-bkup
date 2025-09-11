@@ -1,0 +1,467 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Django PoC — Messenger & KB Upload</title>
+  <style>
+    :root { --sidebar-w: 300px; --gap: 18px; }
+    body { margin: 0; font-family: system-ui, Arial, sans-serif; }
+    .app { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; }
+
+    .sidebar { border-right: 1px solid #eee; padding: 16px; box-sizing: border-box; background: #fbfbfb; overflow:auto; }
+    .menu-title { font-weight: 700; margin-bottom: 8px; }
+    .tree { list-style: none; padding-left: 8px; margin: 6px 0; font-size: 14px; }
+    .tree li { padding: 6px 8px; cursor: pointer; border-radius: 6px; }
+    .tree li:hover { background: #f0f0f0; }
+    .group { font-weight: 600; color: #333; margin-top: 6px; }
+    .leaf { padding-left: 8px; color: #0b63f6; }
+
+    .main { padding: 20px; box-sizing: border-box; overflow:auto; }
+    header { display:flex; align-items:center; justify-content:space-between; }
+    h1 { margin: 0 0 8px 0; font-size: 20px; }
+    .small { font-size: 13px; color: #666; }
+
+    input[type="file"] { display: none; }
+
+    #response, #uploadStatus {
+      margin-top: 12px; white-space: pre-wrap; background: #fafafa; padding: 12px; border-radius: 8px; border: 1px solid #eee;
+    }
+
+    /* success box */
+    .success-box {
+      display:flex; align-items:center; gap:10px; background:#e8f8ed; border:1px solid #cdeccf; color:#0b6624; padding:10px; border-radius:8px;
+    }
+    .success-box .tick { font-size:20px; }
+
+    .progress { height: 10px; background: #eee; border-radius: 6px; overflow: hidden; margin-top: 8px; }
+    .progress > span { display:block; height:100%; width:0%; background: linear-gradient(90deg, #6ea8fe, #2b6cf6); transition: width 0.2s ease; }
+
+    .file-item { color: #222; padding-left: 6px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+    .file-link { color: #0b63f6; text-decoration:none; }
+    .meta { font-size:12px; color:#555; }
+    .btn { border: none; padding:6px 10px; border-radius:6px; cursor:pointer; }
+    .btn-danger { background:#ffebe9; color:#9b1c1c; border:1px solid #f3c2c2; }
+    .btn-primary { background:#e8f0ff; color:#1b4bd8; border:1px solid #c8d9ff; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="menu-title">Menu</div>
+      <ul class="tree">
+        <li class="group">Knowledge Base
+          <ul id="kbList" style="margin-top:6px;">
+            <li class="leaf" id="uploadPdfMenu">📄 Upload PDF to knowledge base</li>
+            <!-- uploaded files inserted here -->
+          </ul>
+        </li>
+
+        <li class="group">Models
+          <ul>
+            <li class="leaf" id="modelsMenu">🧠 Models</li>
+          </ul>
+        </li>
+
+        <li class="group">Utilities
+          <ul>
+            <li class="leaf" id="openMsgArea">💬 Message tester</li>
+          </ul>
+        </li>
+      </ul>
+    </aside>
+
+    <main class="main">
+      <header>
+        <div>
+          <h1>Messenger PoC</h1>
+          <div class="small">Send text messages and upload PDFs to the local knowledge base (dev only)</div>
+        </div>
+      </header>
+
+      <section id="msgPanel" style="margin-top:16px;">
+        <form id="msgForm">
+          <textarea id="message" rows="5" placeholder="Type message..."></textarea><br>
+          <button id="sendBtn" type="submit">Send text</button>
+        </form>
+
+        <div id="response" style="display:none;"></div>
+      </section>
+
+      <section id="uploadPanel" style="margin-top:20px; display:none;">
+        <h3>Upload PDF</h3>
+        <div class="small">Click the menu item <strong>"Upload PDF to knowledge base"</strong> on the left to open the file chooser.</div>
+
+        <input id="fileInput" type="file" accept="application/pdf" />
+
+        <div id="uploadStatus" style="display:none;">
+          <div id="statusText"></div>
+          <div class="progress" style="display:none;"><span id="progressBar"></span></div>
+          <div id="uploadResult" style="margin-top:8px;"></div>
+        </div>
+      </section>
+
+      <section id="detailsPanel" style="margin-top:20px; display:none;">
+        <h3>File details</h3>
+        <div id="detailsBox"></div>
+      </section>
+    </main>
+  </div>
+
+<script>
+  // CSRF helper
+  function getCookie(name) {
+    let cookieValue = null;
+    if (document.cookie && document.cookie !== '') {
+      const cookies = document.cookie.split(';');
+      for (let i=0;i<cookies.length;i++) {
+        const cookie = cookies[i].trim();
+        if (cookie.startsWith(name + '=')) {
+          cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+          break;
+        }
+      }
+    }
+    return cookieValue;
+  }
+  const csrftoken = getCookie('csrftoken');
+
+  // Add file to KB list (expects object {id, display_name, file_url, size, status, uploaded_at})
+  function addFileToKBList(fileObj) {
+    const kbList = document.getElementById('kbList');
+
+    const li = document.createElement('li');
+    li.className = 'file-item';
+    li.setAttribute('data-id', fileObj.id);
+
+    const left = document.createElement('div');
+    left.style.display = 'flex';
+    left.style.alignItems = 'center';
+    left.style.gap = '8px';
+    const icon = document.createElement('span'); icon.textContent = '📄';
+    const name = document.createElement('a');
+    name.href = fileObj.file_url;
+    name.target = '_blank';
+    name.className = 'file-link';
+    name.textContent = fileObj.display_name;
+    left.appendChild(icon); left.appendChild(name);
+
+    const right = document.createElement('div');
+    right.style.display = 'flex'; right.style.gap = '6px'; right.style.alignItems = 'center';
+
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'meta';
+    statusSpan.textContent = fileObj.status === 'DONE' ? '✅' : (fileObj.status === 'PROCESSING' ? '⏳' : '•');
+    statusSpan.title = 'status: ' + fileObj.status;
+
+    right.appendChild(statusSpan);
+
+    li.appendChild(left);
+    li.appendChild(right);
+
+    // Insert after upload menu
+    const uploadMenu = document.getElementById('uploadPdfMenu');
+    if (uploadMenu && uploadMenu.parentNode === kbList) {
+      if (uploadMenu.nextSibling) kbList.insertBefore(li, uploadMenu.nextSibling);
+      else kbList.appendChild(li);
+    } else {
+      kbList.appendChild(li);
+    }
+
+    // click -> show details panel
+    li.addEventListener('click', function(e) {
+      // ignore if clicking on anchor (anchor opens in new tab)
+      if (e.target.tagName.toLowerCase() === 'a') return;
+      showDetails(fileObj.id);
+    });
+  }
+
+  // Load uploads on start
+  async function loadUploads() {
+    try {
+      const resp = await fetch('/api/list-uploads/');
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        data.files.forEach(f => addFileToKBList(f));
+      }
+    } catch (err) {
+      console.warn('loadUploads error', err);
+    }
+  }
+  document.addEventListener('DOMContentLoaded', function() {
+    loadUploads();
+  });
+
+  // Menu handlers
+  document.getElementById('uploadPdfMenu').addEventListener('click', function(e) {
+    document.getElementById('uploadPanel').style.display = 'block';
+    document.getElementById('fileInput').click();
+  });
+  document.getElementById('openMsgArea').addEventListener('click', function(e) {
+    document.getElementById('msgPanel').style.display = 'block';
+  });
+  document.getElementById('modelsMenu').addEventListener('click', function(e) {
+    alert('Models menu clicked — functionality to be added in next iteration.');
+  });
+
+  // Message form
+  document.getElementById('msgForm').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const btn = document.getElementById('sendBtn');
+    btn.disabled = true;
+    const text = document.getElementById('message').value;
+    document.getElementById('response').style.display = 'block';
+    document.getElementById('response').innerText = 'Sending...';
+
+    try {
+      const resp = await fetch('/api/send-text/', {
+        method: 'POST', headers: {'Content-Type': 'application/json','X-CSRFToken': csrftoken},
+        body: JSON.stringify({ text })
+      });
+      const data = await resp.json();
+      document.getElementById('response').innerText = JSON.stringify(data, null, 2);
+    } catch (err) {
+      document.getElementById('response').innerText = 'Network / JS error: ' + err;
+    } finally { btn.disabled = false; }
+  });
+
+  // Upload flow (XHR for progress)
+  const fileInput = document.getElementById('fileInput');
+  fileInput.addEventListener('change', function(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) { alert('Only PDF files allowed'); return; }
+    const maxMB = 20; if (file.size > maxMB * 1024 * 1024) { alert('File too large'); return; }
+
+    const statusBox = document.getElementById('uploadStatus');
+    const statusText = document.getElementById('statusText');
+    const resultBox = document.getElementById('uploadResult');
+    const progressWrap = document.querySelector('.progress');
+    const progressBar = document.getElementById('progressBar');
+
+    statusBox.style.display = 'block'; progressWrap.style.display = 'block'; progressBar.style.width = '0%';
+    statusText.innerText = 'Uploading "' + file.name + '" ...'; resultBox.innerHTML = '';
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload-pdf/', true);
+    xhr.setRequestHeader('X-CSRFToken', csrftoken);
+
+    xhr.upload.addEventListener('progress', function(e) {
+      if (e.lengthComputable) {
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressBar.style.width = pct + '%';
+      }
+    });
+
+    xhr.onreadystatechange = function() {
+      if (xhr.readyState === XMLHttpRequest.DONE) {
+        progressBar.style.width = '100%';
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try {
+            const resp = JSON.parse(xhr.responseText);
+            if (resp.status === 'ok') {
+              const fileObj = {
+                id: resp.id,
+                display_name: resp.original_name,
+                file_url: resp.file_url,
+                size: resp.size,
+                status: resp.status_field,
+                uploaded_at: new Date().toISOString()
+              };
+              addFileToKBList(fileObj);
+
+              // success box
+              const successDiv = document.createElement('div');
+              successDiv.className = 'success-box';
+              successDiv.innerHTML = '<span class="tick">✅</span><div><strong>' +
+                escapeHtml(fileObj.display_name) + '</strong><div class="small">uploaded successfully</div>' +
+                '<div style="margin-top:6px;"><a href="' + fileObj.file_url + '" target="_blank" class="file-link">Open file</a></div></div>';
+              resultBox.appendChild(successDiv);
+              statusText.innerText = 'Upload complete';
+
+              // show details automatically
+              showDetails(fileObj.id);
+
+            } else {
+              statusText.innerText = 'Error uploading';
+              resultBox.innerText = resp.message || JSON.stringify(resp);
+            }
+          } catch (err) {
+            statusText.innerText = 'Server returned invalid JSON';
+            resultBox.innerText = xhr.responseText;
+          }
+        } else {
+          statusText.innerText = 'Upload failed (HTTP ' + xhr.status + ')';
+          try {
+            const errResp = JSON.parse(xhr.responseText);
+            resultBox.innerText = errResp.message || xhr.responseText;
+          } catch (err) {
+            resultBox.innerText = xhr.responseText;
+          }
+        }
+        fileInput.value = '';
+      }
+    };
+
+    const formData = new FormData();
+    formData.append('file', file);
+    xhr.send(formData);
+  });
+
+  // show details for a file
+  async function showDetails(id) {
+    const panel = document.getElementById('detailsPanel');
+    const box = document.getElementById('detailsBox');
+    panel.style.display = 'block';
+    box.innerHTML = 'Loading...';
+
+    try {
+      const resp = await fetch('/api/file/' + id + '/details/');
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        const html = [];
+        html.push('<div style="display:flex;align-items:center;gap:12px;">' +
+          (data.status_field === 'DONE' ? '<span style="font-size:20px">✅</span>' :
+           data.status_field === 'PROCESSING' ? '<span style="font-size:20px">⏳</span>' : '<span>•</span>') +
+          '<div><strong>' + escapeHtml(data.display_name) + '</strong>' +
+          '<div class="meta">' + new Date(data.uploaded_at).toLocaleString() + ' • ' + humanFileSize(data.size) + '</div></div></div>');
+
+        html.push('<div style="margin-top:12px;">Status: <strong>' + data.status_field + '</strong></div>');
+        html.push('<div style="margin-top:6px;">Embeddings stored: <strong>' + (data.embeddings_stored ? 'Yes' : 'No') + '</strong></div>');
+        html.push('<div style="margin-top:12px;"><a class="file-link" href="' + data.file_url + '" target="_blank">Open file</a></div>');
+
+        // Rename and Delete buttons
+        html.push('<div style="margin-top:14px;display:flex;gap:8px;">' +
+          '<button id="renameBtn" class="btn btn-primary">Rename</button>' +
+          '<button id="deleteBtn" class="btn btn-danger">Delete</button>' +
+          '</div>');
+
+        box.innerHTML = html.join('');
+
+        document.getElementById('renameBtn').addEventListener('click', function() {
+          const newName = prompt('Enter new display name', data.display_name);
+          if (newName && newName.trim()) {
+            renameFile(data.id, newName.trim());
+          }
+        });
+        document.getElementById('deleteBtn').addEventListener('click', function() {
+          if (confirm('Delete "' + data.display_name + '" ?')) {
+            deleteFile(data.id);
+          }
+        });
+
+        // If still processing, start a small poller to refresh status
+        if (data.status_field === 'PROCESSING') {
+          pollDetailsUntilDone(data.id, box);
+        }
+      } else {
+        box.innerText = 'Error: ' + (data.message || 'Unknown');
+      }
+    } catch (err) {
+      box.innerText = 'Network error: ' + err;
+    }
+  }
+
+  // poll details until status changes from PROCESSING
+  function pollDetailsUntilDone(id, box) {
+    let attempts = 0;
+    const interval = setInterval(async () => {
+      attempts++;
+      try {
+        const resp = await fetch('/api/file/' + id + '/details/');
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          // update a small status display if needed
+          if (data.status_field !== 'PROCESSING') {
+            clearInterval(interval);
+            // refresh the details panel
+            showDetails(id);
+            // update left menu icon
+            updateLeftMenuStatus(id, data.status_field);
+          }
+        }
+      } catch (err) {
+        clearInterval(interval);
+      }
+      if (attempts > 30) { clearInterval(interval); } // stop after some attempts
+    }, 3000);
+  }
+
+  function updateLeftMenuStatus(id, status) {
+    const node = document.querySelector('#kbList li[data-id="'+id+'"]');
+    if (!node) return;
+    const statusSpan = node.querySelector('.meta');
+    if (statusSpan) {
+      statusSpan.textContent = status === 'DONE' ? '✅' : (status === 'PROCESSING' ? '⏳' : '•');
+      statusSpan.title = 'status: ' + status;
+    }
+  }
+
+  // delete file
+  async function deleteFile(id) {
+    try {
+      const resp = await fetch('/api/file/' + id + '/delete/', { method: 'POST', headers: {'X-CSRFToken': csrftoken}});
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        // remove from left menu
+        const node = document.querySelector('#kbList li[data-id="'+id+'"]');
+        if (node) node.remove();
+        // hide details panel
+        document.getElementById('detailsPanel').style.display = 'none';
+        alert('Deleted');
+      } else {
+        alert('Delete failed: ' + (data.message || 'unknown'));
+      }
+    } catch (err) {
+      alert('Network error: ' + err);
+    }
+  }
+
+  // rename file (changes display_name in DB)
+  async function renameFile(id, newName) {
+    try {
+      const resp = await fetch('/api/file/' + id + '/rename/', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json','X-CSRFToken': csrftoken},
+        body: JSON.stringify({ new_name: newName })
+      });
+      const data = await resp.json();
+      if (data.status === 'ok') {
+        // update left menu label
+        const node = document.querySelector('#kbList li[data-id="'+id+'"]');
+        if (node) {
+          const a = node.querySelector('a.file-link');
+          if (a) a.textContent = data.display_name;
+        }
+        // update details panel
+        showDetails(id);
+      } else {
+        alert('Rename failed: ' + (data.message || 'unknown'));
+      }
+    } catch (err) {
+      alert('Network error: ' + err);
+    }
+  }
+
+  function humanFileSize(bytes, si=false) {
+    const thresh = si ? 1000 : 1024;
+    if (Math.abs(bytes) < thresh) return bytes + ' B';
+    const units = si ? ['kB','MB','GB','TB'] : ['KiB','MiB','GiB','TiB'];
+    let u = -1;
+    do {
+      bytes /= thresh; ++u;
+    } while(Math.abs(bytes) >= thresh && u < units.length - 1);
+    return bytes.toFixed(1) + ' ' + units[u];
+  }
+
+  function escapeHtml(unsafe) {
+    return unsafe
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
+  }
+</script>
+</body>
+</html>
