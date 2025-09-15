@@ -2,18 +2,18 @@ version: '3.8'
 services:
   redis:
     image: redis:7
-    container_name: poc_redis
+    container_name: poc_redis_bk
     ports:
-      - "6379:6379"
+      - "6380:6379"
 
   web:
     build: .
-    container_name: poc_web
+    container_name: poc_web_bk
     command: python manage.py runserver 0.0.0.0:8000
     volumes:
       - .:/app
     ports:
-      - "8000:8000"
+      - "8001:8000"
     depends_on:
       - redis
     environment:
@@ -22,7 +22,7 @@ services:
 
   worker:
     build: .
-    container_name: poc_worker
+    container_name: poc_worker_bk
     command: celery -A poc_server worker --loglevel=info
     volumes:
       - .:/app
